@@ -2,7 +2,7 @@
   "rewrites": [
     {
       "source": "/trees/:path*",
-      "destination": "http://47.83.175.7:5000/trees/:path*"
+      "destination": "http://47.236.167.129:5000/trees/:path*"
     }
   ]
 }
