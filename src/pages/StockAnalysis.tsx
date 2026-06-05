@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   AutoComplete,
@@ -7,6 +7,7 @@ import {
   Col,
   DatePicker,
   Empty,
+  message,
   Row,
   Space,
   Spin,
@@ -17,7 +18,7 @@ import { LineChartOutlined, RobotOutlined, SearchOutlined } from "@ant-design/ic
 import dayjs, { type Dayjs } from "dayjs";
 import KLineChart from "../components/KLineChart";
 import MarkdownContent from "../components/MarkdownContent";
-import { fetchStockAnalysis, STOCK_OPTIONS } from "../utils/api";
+import { fetchStockAnalysis, fetchStockMapping, type StockOption } from "../utils/api";
 import useIsMobile from "../hooks/useIsMobile";
 import type { StockAnalysisResponse } from "../types";
 
@@ -32,67 +33,151 @@ const NODE_TAG_COLORS: Record<string, string> = {
   important: "purple",
 };
 
-const STOCK_AUTOCOMPLETE_OPTIONS = STOCK_OPTIONS.map((item) => ({
-  value: item.value,
-  label: item.label,
-}));
+const MAX_SUGGESTIONS = 50;
 
 function normalizeStockCode(code: string): string {
   return code.trim().toUpperCase();
 }
 
-function filterStockOption(input: string, option?: { value?: string; label?: string }) {
-  const query = input.trim().toUpperCase();
-  if (!query) return true;
+interface ActiveQuery {
+  code: string;
+  startDate: string;
+  endDate: string;
+  controller: AbortController;
+}
 
-  const value = (option?.value ?? "").toUpperCase();
-  const label = (option?.label ?? "").toUpperCase();
-  return value.includes(query) || label.includes(query);
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
+function searchStockOptions(
+  options: StockOption[],
+  input: string,
+): { value: string; label: string }[] {
+  const query = input.trim().toUpperCase();
+  if (!query) return [];
+
+  const results: { value: string; label: string }[] = [];
+  for (const opt of options) {
+    if (
+      opt.value.toUpperCase().includes(query) ||
+      opt.name.toUpperCase().includes(query)
+    ) {
+      results.push({ value: opt.value, label: opt.label });
+      if (results.length >= MAX_SUGGESTIONS) break;
+    }
+  }
+  return results;
 }
 
 export default function StockAnalysisPage() {
   const isMobile = useIsMobile();
   const [stockCode, setStockCode] = useState("000001.SZ");
   const [dateRange, setDateRange] = useState<[Dayjs, Dayjs]>([
-    dayjs().startOf("year"),
+    dayjs().subtract(365, "day"),
     dayjs(),
   ]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<StockAnalysisResponse | null>(null);
+  const [stockOptions, setStockOptions] = useState<StockOption[]>([]);
+  const [mappingLoading, setMappingLoading] = useState(true);
+  const [mappingError, setMappingError] = useState("");
+  const activeQueryRef = useRef<ActiveQuery | null>(null);
 
-  const selectedLabel = useMemo(
-    () => STOCK_OPTIONS.find((o) => o.value === stockCode)?.label ?? stockCode,
-    [stockCode],
+  useEffect(() => {
+    let cancelled = false;
+
+    fetchStockMapping()
+      .then((options) => {
+        if (!cancelled) setStockOptions(options);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setMappingError(e instanceof Error ? e.message : "股票列表加载失败");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setMappingLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      activeQueryRef.current?.controller.abort();
+    };
+  }, []);
+
+  const stockOptionByCode = useMemo(
+    () => new Map(stockOptions.map((opt) => [opt.value, opt])),
+    [stockOptions],
   );
 
+  const autocompleteOptions = useMemo(
+    () => searchStockOptions(stockOptions, stockCode),
+    [stockOptions, stockCode],
+  );
+
+  const selectedLabel = useMemo(() => {
+    const matched =
+      stockOptionByCode.get(stockCode) ??
+      stockOptionByCode.get(normalizeStockCode(stockCode));
+    return matched?.label ?? stockCode;
+  }, [stockCode, stockOptionByCode]);
+
   const handleQuery = async () => {
-    const code = normalizeStockCode(stockCode);
-    if (!code) {
-      setError("请输入股票代码");
+    if (!stockCode.trim()) {
+      message.warning("请输入股票代码");
       return;
     }
+
+    const code = normalizeStockCode(stockCode);
     if (!dateRange[0] || !dateRange[1]) {
       setError("请选择完整的日期范围");
       return;
     }
 
+    const startDate = dateRange[0].format("YYYY-MM-DD");
+    const endDate = dateRange[1].format("YYYY-MM-DD");
+    const active = activeQueryRef.current;
+
+    if (
+      active &&
+      active.code === code &&
+      active.startDate === startDate &&
+      active.endDate === endDate
+    ) {
+      return;
+    }
+
+    active?.controller.abort();
+
+    const controller = new AbortController();
+    activeQueryRef.current = { code, startDate, endDate, controller };
+
     setLoading(true);
     setError("");
 
     try {
-      const data = await fetchStockAnalysis(
-        code,
-        dateRange[0].format("YYYY-MM-DD"),
-        dateRange[1].format("YYYY-MM-DD"),
-      );
-      setResult(data);
-      setStockCode(code);
+      const data = await fetchStockAnalysis(code, startDate, endDate, controller.signal);
+      if (activeQueryRef.current?.controller === controller) {
+        setResult(data);
+      }
     } catch (e) {
-      setResult(null);
-      setError(e instanceof Error ? e.message : "查询失败");
+      if (isAbortError(e) || controller.signal.aborted) return;
+      if (activeQueryRef.current?.controller === controller) {
+        setResult(null);
+        setError(e instanceof Error ? e.message : "查询失败");
+      }
     } finally {
-      setLoading(false);
+      if (activeQueryRef.current?.controller === controller) {
+        setLoading(false);
+        activeQueryRef.current = null;
+      }
     }
   };
 
@@ -112,13 +197,15 @@ export default function StockAnalysisPage() {
             <div style={{ marginBottom: 6, color: "rgba(255,255,255,0.65)", fontSize: 13 }}>股票代码</div>
             <AutoComplete
               value={stockCode}
-              options={STOCK_AUTOCOMPLETE_OPTIONS}
+              options={autocompleteOptions}
               onChange={setStockCode}
-              onSelect={(value) => setStockCode(normalizeStockCode(String(value)))}
-              onBlur={() => setStockCode((prev) => normalizeStockCode(prev))}
-              filterOption={filterStockOption}
+              onSelect={(value) => setStockCode(String(value))}
               style={{ width: "100%" }}
-              placeholder="输入或搜索股票代码，如 000001.SZ"
+              placeholder={
+                mappingLoading
+                  ? "正在加载股票列表..."
+                  : "输入股票代码或公司名称搜索，如 000001.SZ、平安银行"
+              }
               allowClear
             />
           </Col>
@@ -140,7 +227,6 @@ export default function StockAnalysisPage() {
             <Button
               type="primary"
               icon={<SearchOutlined />}
-              loading={loading}
               onClick={handleQuery}
               block={isMobile}
               style={isMobile ? undefined : { minWidth: 120 }}
@@ -150,6 +236,16 @@ export default function StockAnalysisPage() {
           </Col>
         </Row>
       </Card>
+
+      {mappingError && (
+        <Alert
+          type="warning"
+          message={mappingError}
+          description="仍可手动输入股票代码进行查询"
+          showIcon
+          style={{ marginTop: 12 }}
+        />
+      )}
 
       {error && (
         <Alert type="error" message={error} showIcon style={{ marginTop: 12 }} />

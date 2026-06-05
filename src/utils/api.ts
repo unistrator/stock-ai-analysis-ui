@@ -117,6 +117,7 @@ async function requestTreesAnalysis(
   stockCode: string,
   startDate: string,
   endDate: string,
+  signal?: AbortSignal,
 ): Promise<StockAnalysisResponse> {
   const res = await fetch(withAuthUrl(ANALYZE_API_URL), {
     method: "POST",
@@ -131,6 +132,7 @@ async function requestTreesAnalysis(
       max_tokens: null,
       extra_prompt: null,
     }),
+    signal,
   });
 
   handleAuthError(res);
@@ -153,6 +155,7 @@ async function requestLegacyAnalysis(
   stockCode: string,
   startDate: string,
   endDate: string,
+  signal?: AbortSignal,
 ): Promise<StockAnalysisResponse> {
   const url = new URL(`${API_BASE}/api/stock-analysis`);
   url.searchParams.set("stock_code", stockCode);
@@ -162,6 +165,7 @@ async function requestLegacyAnalysis(
 
   const res = await fetch(url.toString(), {
     headers: authHeaders(),
+    signal,
   });
 
   handleAuthError(res);
@@ -175,27 +179,55 @@ export async function fetchStockAnalysis(
   stockCode: string,
   startDate: string,
   endDate: string,
+  signal?: AbortSignal,
 ): Promise<StockAnalysisResponse> {
   if (USE_MOCK) {
-    await mockDelay();
+    await mockDelay(600, signal);
     return createMockAnalysis(stockCode, startDate, endDate);
   }
 
   if (ANALYZE_API_URL) {
-    return requestTreesAnalysis(stockCode, startDate, endDate);
+    return requestTreesAnalysis(stockCode, startDate, endDate, signal);
   }
 
-  return requestLegacyAnalysis(stockCode, startDate, endDate);
+  return requestLegacyAnalysis(stockCode, startDate, endDate, signal);
 }
 
-export const STOCK_OPTIONS = [
-  { value: "000001.SZ", label: "000001.SZ 平安银行" },
-  { value: "00700.HK", label: "00700.HK 腾讯控股" },
-  { value: "600519.SH", label: "600519.SH 贵州茅台" },
-  { value: "000858.SZ", label: "000858.SZ 五粮液" },
-  { value: "601318.SH", label: "601318.SH 中国平安" },
-  { value: "300750.SZ", label: "300750.SZ 宁德时代" },
-  { value: "002594.SZ", label: "002594.SZ 比亚迪" },
-  { value: "600036.SH", label: "600036.SH 招商银行" },
-  { value: "000333.SZ", label: "000333.SZ 美的集团" },
-];
+export interface StockOption {
+  value: string;
+  label: string;
+  name: string;
+}
+
+type StockMappingResponse = Record<string, Record<string, string>>;
+
+const STOCK_MAPPING_URL =
+  import.meta.env.VITE_STOCK_MAPPING_URL ?? "/stock_codes/mapping";
+
+function mapResponseToStockOptions(data: StockMappingResponse): StockOption[] {
+  const options: StockOption[] = [];
+  for (const group of Object.values(data)) {
+    for (const [code, name] of Object.entries(group)) {
+      if (!code || !name?.trim()) continue;
+      options.push({
+        value: code,
+        name: name.trim(),
+        label: `${code} ${name.trim()}`,
+      });
+    }
+  }
+  return options;
+}
+
+export async function fetchStockMapping(): Promise<StockOption[]> {
+  const res = await fetch(withAuthUrl(STOCK_MAPPING_URL), {
+    headers: authHeaders(),
+  });
+
+  handleAuthError(res);
+  if (!res.ok) {
+    throw new Error(`股票列表加载失败：HTTP ${res.status}`);
+  }
+  const data = (await res.json()) as StockMappingResponse;
+  return mapResponseToStockOptions(data);
+}

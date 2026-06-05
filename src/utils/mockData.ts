@@ -140,6 +140,16 @@ export function createMockAnalysis(
   };
 }
 
-export async function mockDelay(ms = 600): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, ms));
+export async function mockDelay(ms = 600, signal?: AbortSignal): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        reject(new DOMException("Aborted", "AbortError"));
+      },
+      { once: true },
+    );
+  });
 }

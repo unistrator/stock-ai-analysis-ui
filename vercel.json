@@ -3,6 +3,10 @@
     {
       "source": "/trees/:path*",
       "destination": "http://47.236.167.129:5000/trees/:path*"
+    },
+    {
+      "source": "/stock_codes/:path*",
+      "destination": "http://47.236.167.129:5000/stock_codes/:path*"
     }
   ]
 }
