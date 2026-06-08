@@ -1,24 +1,43 @@
-import type { ImportantNode, KLinePoint, StockAnalysisResponse } from "../types";
+import type {
+  BriefAnalysisResult,
+  DetailAnalysisResult,
+  ImportantNode,
+  KLinePoint,
+} from "../types";
 import { authHeaders, requireToken } from "./auth";
 import { createMockAnalysis, mockDelay } from "./mockData";
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? "";
-const ANALYZE_API_URL = import.meta.env.VITE_ANALYZE_API_URL ?? "/trees/analyze";
+const ANALYZE_BRIEF_URL =
+  import.meta.env.VITE_ANALYZE_BRIEF_URL ?? "/trees/analyze/brief";
+const ANALYZE_DETAIL_URL =
+  import.meta.env.VITE_ANALYZE_DETAIL_URL ?? "/trees/analyze/detail";
 const USE_MOCK = import.meta.env.VITE_USE_MOCK === "true";
 
-interface TreesAnalyzeResponse {
+interface TreesDailyBar {
+  date: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  amount?: number;
+}
+
+interface TreesBriefResponse {
   analysis: string;
   total_analyze: string;
-  daily_data: Array<{
-    date: string;
-    open: number;
-    high: number;
-    low: number;
-    close: number;
-    volume: number;
-    amount?: number;
-  }>;
+  daily_data: TreesDailyBar[];
   important_point: Record<string, string>;
+  meta: {
+    stock_code: string;
+    time_range?: string;
+    tree_name?: string;
+    daily_count?: number;
+  };
+}
+
+interface TreesDetailResponse {
+  analysis: string;
   meta: {
     stock_code: string;
     time_range?: string;
@@ -53,12 +72,8 @@ function normalizeDate(date: string): string {
   return date.split(" ")[0];
 }
 
-function mapTreesResponse(
-  data: TreesAnalyzeResponse,
-  startDate: string,
-  endDate: string,
-): StockAnalysisResponse {
-  const kline: KLinePoint[] = data.daily_data.map((bar) => ({
+function mapKline(dailyData: TreesDailyBar[]): KLinePoint[] {
+  return dailyData.map((bar) => ({
     date: normalizeDate(bar.date),
     open: Number(bar.open.toFixed(2)),
     high: Number(bar.high.toFixed(2)),
@@ -66,10 +81,15 @@ function mapTreesResponse(
     close: Number(bar.close.toFixed(2)),
     volume: bar.volume,
   }));
+}
 
+function mapImportantNodes(
+  importantPoint: Record<string, string>,
+  kline: KLinePoint[],
+): ImportantNode[] {
   const priceByDate = new Map(kline.map((bar) => [bar.date, bar]));
 
-  const nodes: ImportantNode[] = Object.entries(data.important_point || {})
+  return Object.entries(importantPoint || {})
     .map(([date, description]) => {
       const normalizedDate = normalizeDate(date);
       const bar = priceByDate.get(normalizedDate);
@@ -84,15 +104,28 @@ function mapTreesResponse(
       };
     })
     .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function mapBriefResponse(
+  data: TreesBriefResponse,
+  startDate: string,
+  endDate: string,
+): BriefAnalysisResult {
+  const kline = mapKline(data.daily_data);
 
   return {
     stock_code: data.meta.stock_code,
     start_date: toApiDate(startDate),
     end_date: toApiDate(endDate),
     summary: data.total_analyze || "",
-    analysis: data.analysis || "",
     kline,
-    nodes,
+    nodes: mapImportantNodes(data.important_point, kline),
+  };
+}
+
+function mapDetailResponse(data: TreesDetailResponse): DetailAnalysisResult {
+  return {
+    analysis: data.analysis || "",
   };
 }
 
@@ -113,106 +146,141 @@ function withAuthUrl(pathOrUrl: string): string {
   return url.toString();
 }
 
-async function requestTreesAnalysis(
+function buildAnalyzeRequestBody(
+  stockCode: string,
+  startDate: string,
+  endDate: string,
+) {
+  return JSON.stringify({
+    code: stockCode,
+    start_date: startDate,
+    end_date: endDate,
+    use_local_build: true,
+    overwrite: true,
+    temperature: null,
+    max_tokens: null,
+    extra_prompt: null,
+  });
+}
+
+async function parseAnalyzeError(res: Response): Promise<string> {
+  let message = `请求失败：HTTP ${res.status}`;
+  try {
+    const err = await res.json();
+    if (err?.error) message = err.error;
+  } catch {
+    // ignore parse error
+  }
+  return message;
+}
+
+async function requestTreesSection<T>(
+  url: string,
   stockCode: string,
   startDate: string,
   endDate: string,
   signal?: AbortSignal,
-): Promise<StockAnalysisResponse> {
-  const res = await fetch(withAuthUrl(ANALYZE_API_URL), {
+): Promise<T> {
+  const res = await fetch(withAuthUrl(url), {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({
-      code: stockCode,
-      start_date: startDate,
-      end_date: endDate,
-      use_local_build: true,
-      overwrite: true,
-      temperature: null,
-      max_tokens: null,
-      extra_prompt: null,
-    }),
+    body: buildAnalyzeRequestBody(stockCode, startDate, endDate),
     signal,
   });
 
   handleAuthError(res);
   if (!res.ok) {
-    let message = `请求失败：HTTP ${res.status}`;
-    try {
-      const err = await res.json();
-      if (err?.error) message = err.error;
-    } catch {
-      // ignore parse error
-    }
-    throw new Error(message);
+    throw new Error(await parseAnalyzeError(res));
   }
 
-  const data = (await res.json()) as TreesAnalyzeResponse;
-  return mapTreesResponse(data, startDate, endDate);
+  return res.json() as Promise<T>;
 }
 
-async function requestLegacyAnalysis(
+export async function fetchBriefAnalysis(
   stockCode: string,
   startDate: string,
   endDate: string,
   signal?: AbortSignal,
-): Promise<StockAnalysisResponse> {
-  const url = new URL(`${API_BASE}/api/stock-analysis`);
-  url.searchParams.set("stock_code", stockCode);
-  url.searchParams.set("start_date", toApiDate(startDate));
-  url.searchParams.set("end_date", toApiDate(endDate));
-  url.searchParams.set("token", requireToken());
-
-  const res = await fetch(url.toString(), {
-    headers: authHeaders(),
-    signal,
-  });
-
-  handleAuthError(res);
-  if (!res.ok) {
-    throw new Error(`请求失败：HTTP ${res.status}`);
-  }
-  return res.json();
-}
-
-export async function fetchStockAnalysis(
-  stockCode: string,
-  startDate: string,
-  endDate: string,
-  signal?: AbortSignal,
-): Promise<StockAnalysisResponse> {
+): Promise<BriefAnalysisResult> {
   if (USE_MOCK) {
     await mockDelay(600, signal);
-    return createMockAnalysis(stockCode, startDate, endDate);
+    const mock = createMockAnalysis(stockCode, startDate, endDate);
+    return {
+      stock_code: mock.stock_code,
+      start_date: mock.start_date,
+      end_date: mock.end_date,
+      summary: mock.summary,
+      kline: mock.kline,
+      nodes: mock.nodes,
+    };
   }
 
-  if (ANALYZE_API_URL) {
-    return requestTreesAnalysis(stockCode, startDate, endDate, signal);
+  const data = await requestTreesSection<TreesBriefResponse>(
+    ANALYZE_BRIEF_URL,
+    stockCode,
+    startDate,
+    endDate,
+    signal,
+  );
+  return mapBriefResponse(data, startDate, endDate);
+}
+
+export async function fetchDetailAnalysis(
+  stockCode: string,
+  startDate: string,
+  endDate: string,
+  signal?: AbortSignal,
+): Promise<DetailAnalysisResult> {
+  if (USE_MOCK) {
+    await mockDelay(900, signal);
+    const mock = createMockAnalysis(stockCode, startDate, endDate);
+    return { analysis: mock.analysis };
   }
 
-  return requestLegacyAnalysis(stockCode, startDate, endDate, signal);
+  const data = await requestTreesSection<TreesDetailResponse>(
+    ANALYZE_DETAIL_URL,
+    stockCode,
+    startDate,
+    endDate,
+    signal,
+  );
+  return mapDetailResponse(data);
 }
 
 export interface StockOption {
   value: string;
   label: string;
   name: string;
+  pinyinFull: string;
+  pinyinAbbr: string;
 }
 
-type StockMappingResponse = Record<string, Record<string, string>>;
+interface StockMappingResponse {
+  code_name: Record<string, Record<string, string>>;
+  name_pinyin: Record<string, string>;
+}
 
 const STOCK_MAPPING_URL =
   import.meta.env.VITE_STOCK_MAPPING_URL ?? "/stock_codes/mapping";
 
+function parseNamePinyin(raw: string): { full: string; abbr: string } {
+  const [full = "", abbr = ""] = raw.trim().split(/\s+/);
+  return { full, abbr };
+}
+
 function mapResponseToStockOptions(data: StockMappingResponse): StockOption[] {
   const options: StockOption[] = [];
-  for (const group of Object.values(data)) {
+  for (const group of Object.values(data.code_name ?? {})) {
     for (const [code, name] of Object.entries(group)) {
       if (!code || !name?.trim()) continue;
+      const trimmedName = name.trim();
+      const { full, abbr } = parseNamePinyin(data.name_pinyin?.[trimmedName] ?? "");
       options.push({
         value: code,
-        name: name.trim(),
-        label: `${code} ${name.trim()}`,
+        name: trimmedName,
+        label: `${code} ${trimmedName}`,
+        pinyinFull: full,
+        pinyinAbbr: abbr,
       });
     }
   }

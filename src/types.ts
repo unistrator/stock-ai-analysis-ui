@@ -26,6 +26,19 @@ export interface StockAnalysisResponse {
   nodes: ImportantNode[];
 }
 
+export interface BriefAnalysisResult {
+  stock_code: string;
+  start_date: string;
+  end_date: string;
+  summary: string;
+  kline: KLinePoint[];
+  nodes: ImportantNode[];
+}
+
+export interface DetailAnalysisResult {
+  analysis: string;
+}
+
 export interface StockOption {
   value: string;
   label: string;

@@ -18,9 +18,19 @@ import { LineChartOutlined, RobotOutlined, SearchOutlined } from "@ant-design/ic
 import dayjs, { type Dayjs } from "dayjs";
 import KLineChart from "../components/KLineChart";
 import MarkdownContent from "../components/MarkdownContent";
-import { fetchStockAnalysis, fetchStockMapping, type StockOption } from "../utils/api";
+import {
+  fetchBriefAnalysis,
+  fetchDetailAnalysis,
+  fetchStockMapping,
+  type StockOption,
+} from "../utils/api";
 import useIsMobile from "../hooks/useIsMobile";
-import type { StockAnalysisResponse } from "../types";
+import type { BriefAnalysisResult, DetailAnalysisResult } from "../types";
+import {
+  appendStockQueryHistory,
+  loadStockQueryHistory,
+  type StockQueryHistoryItem,
+} from "../utils/queryHistory";
 
 const { RangePicker } = DatePicker;
 const { Text } = Typography;
@@ -34,6 +44,12 @@ const NODE_TAG_COLORS: Record<string, string> = {
 };
 
 const MAX_SUGGESTIONS = 50;
+
+const SUMMARY_HEADER_TAG_STYLE = {
+  fontSize: 14,
+  lineHeight: "22px",
+  padding: "2px 10px",
+};
 
 function normalizeStockCode(code: string): string {
   return code.trim().toUpperCase();
@@ -54,20 +70,33 @@ function searchStockOptions(
   options: StockOption[],
   input: string,
 ): { value: string; label: string }[] {
-  const query = input.trim().toUpperCase();
+  const query = input.trim();
   if (!query) return [];
+
+  const queryUpper = query.toUpperCase();
+  const queryLower = query.toLowerCase();
 
   const results: { value: string; label: string }[] = [];
   for (const opt of options) {
     if (
-      opt.value.toUpperCase().includes(query) ||
-      opt.name.toUpperCase().includes(query)
+      opt.value.toUpperCase().includes(queryUpper) ||
+      opt.name.includes(query) ||
+      opt.pinyinFull.includes(queryLower) ||
+      opt.pinyinAbbr.includes(queryLower)
     ) {
       results.push({ value: opt.value, label: opt.label });
       if (results.length >= MAX_SUGGESTIONS) break;
     }
   }
   return results;
+}
+
+function formatHistoryLabel(
+  item: StockQueryHistoryItem,
+  stockOptionByCode: Map<string, StockOption>,
+): string {
+  const name = item.stockName ?? stockOptionByCode.get(item.stockCode)?.name;
+  return name ? `${item.stockCode} ${name}` : item.stockCode;
 }
 
 export default function StockAnalysisPage() {
@@ -77,12 +106,17 @@ export default function StockAnalysisPage() {
     dayjs().subtract(365, "day"),
     dayjs(),
   ]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [result, setResult] = useState<StockAnalysisResponse | null>(null);
+  const [briefLoading, setBriefLoading] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [briefError, setBriefError] = useState("");
+  const [detailError, setDetailError] = useState("");
+  const [briefResult, setBriefResult] = useState<BriefAnalysisResult | null>(null);
+  const [detailResult, setDetailResult] = useState<DetailAnalysisResult | null>(null);
+  const [hasQueried, setHasQueried] = useState(false);
   const [stockOptions, setStockOptions] = useState<StockOption[]>([]);
   const [mappingLoading, setMappingLoading] = useState(true);
   const [mappingError, setMappingError] = useState("");
+  const [queryHistory, setQueryHistory] = useState(() => loadStockQueryHistory());
   const activeQueryRef = useRef<ActiveQuery | null>(null);
 
   useEffect(() => {
@@ -122,12 +156,22 @@ export default function StockAnalysisPage() {
     [stockOptions, stockCode],
   );
 
-  const selectedLabel = useMemo(() => {
-    const matched =
-      stockOptionByCode.get(stockCode) ??
-      stockOptionByCode.get(normalizeStockCode(stockCode));
-    return matched?.label ?? stockCode;
-  }, [stockCode, stockOptionByCode]);
+  const briefStockLabel = useMemo(() => {
+    if (!briefResult) return "";
+    const matched = stockOptionByCode.get(briefResult.stock_code);
+    return matched ? `${briefResult.stock_code} ${matched.name}` : briefResult.stock_code;
+  }, [briefResult, stockOptionByCode]);
+
+  const queryInfoTags = briefResult ? (
+    <>
+      <Tag color="geekblue" style={SUMMARY_HEADER_TAG_STYLE}>
+        {briefStockLabel}
+      </Tag>
+      <Tag color="orange" style={SUMMARY_HEADER_TAG_STYLE}>
+        {briefResult.start_date} ~ {briefResult.end_date}
+      </Tag>
+    </>
+  ) : null;
 
   const handleQuery = async () => {
     if (!stockCode.trim()) {
@@ -137,7 +181,7 @@ export default function StockAnalysisPage() {
 
     const code = normalizeStockCode(stockCode);
     if (!dateRange[0] || !dateRange[1]) {
-      setError("请选择完整的日期范围");
+      message.warning("请选择完整的日期范围");
       return;
     }
 
@@ -159,25 +203,55 @@ export default function StockAnalysisPage() {
     const controller = new AbortController();
     activeQueryRef.current = { code, startDate, endDate, controller };
 
-    setLoading(true);
-    setError("");
+    setHasQueried(true);
+    setBriefLoading(true);
+    setDetailLoading(true);
+    setBriefError("");
+    setDetailError("");
+    setBriefResult(null);
+    setDetailResult(null);
 
-    try {
-      const data = await fetchStockAnalysis(code, startDate, endDate, controller.signal);
-      if (activeQueryRef.current?.controller === controller) {
-        setResult(data);
-      }
-    } catch (e) {
-      if (isAbortError(e) || controller.signal.aborted) return;
-      if (activeQueryRef.current?.controller === controller) {
-        setResult(null);
-        setError(e instanceof Error ? e.message : "查询失败");
-      }
-    } finally {
-      if (activeQueryRef.current?.controller === controller) {
-        setLoading(false);
-        activeQueryRef.current = null;
-      }
+    const isActive = () => activeQueryRef.current?.controller === controller;
+
+    const briefPromise = fetchBriefAnalysis(code, startDate, endDate, controller.signal)
+      .then((data) => {
+        if (!isActive()) return;
+        setBriefResult(data);
+        setBriefError("");
+        setQueryHistory(
+          appendStockQueryHistory(code, stockOptionByCode.get(code)?.name),
+        );
+      })
+      .catch((e) => {
+        if (isAbortError(e) || controller.signal.aborted) return;
+        if (!isActive()) return;
+        setBriefResult(null);
+        setBriefError(e instanceof Error ? e.message : "简要分析加载失败");
+      })
+      .finally(() => {
+        if (isActive()) setBriefLoading(false);
+      });
+
+    const detailPromise = fetchDetailAnalysis(code, startDate, endDate, controller.signal)
+      .then((data) => {
+        if (!isActive()) return;
+        setDetailResult(data);
+        setDetailError("");
+      })
+      .catch((e) => {
+        if (isAbortError(e) || controller.signal.aborted) return;
+        if (!isActive()) return;
+        setDetailResult(null);
+        setDetailError(e instanceof Error ? e.message : "完整分析加载失败");
+      })
+      .finally(() => {
+        if (isActive()) setDetailLoading(false);
+      });
+
+    await Promise.allSettled([briefPromise, detailPromise]);
+
+    if (isActive()) {
+      activeQueryRef.current = null;
     }
   };
 
@@ -204,7 +278,7 @@ export default function StockAnalysisPage() {
               placeholder={
                 mappingLoading
                   ? "正在加载股票列表..."
-                  : "输入股票代码或公司名称搜索，如 000001.SZ、平安银行"
+                  : "输入代码、名称或拼音首字母，如 000001.SZ、茅台、gzmt"
               }
               allowClear
             />
@@ -235,6 +309,26 @@ export default function StockAnalysisPage() {
             </Button>
           </Col>
         </Row>
+        {queryHistory.length > 0 && (
+          <Row gutter={[12, 12]} style={{ marginTop: 20 }}>
+            <Col xs={24} md={8}>
+              <Text type="secondary" style={{ fontSize: 12, marginRight: 8 }}>
+                最近查询
+              </Text>
+              <Space wrap size={[4, 4]}>
+                {queryHistory.map((item) => (
+                  <Tag
+                    key={item.stockCode}
+                    style={{ cursor: "pointer", marginInlineEnd: 0 }}
+                    onClick={() => setStockCode(item.stockCode)}
+                  >
+                    {formatHistoryLabel(item, stockOptionByCode)}
+                  </Tag>
+                ))}
+              </Space>
+            </Col>
+          </Row>
+        )}
       </Card>
 
       {mappingError && (
@@ -247,34 +341,15 @@ export default function StockAnalysisPage() {
         />
       )}
 
-      {error && (
-        <Alert type="error" message={error} showIcon style={{ marginTop: 12 }} />
-      )}
-
-      {loading && (
-        <div style={{ marginTop: 48, textAlign: "center" }}>
-          <Spin size="large" tip="正在调用分析服务，可能需要 10~30 秒..." />
-        </div>
-      )}
-
-      {!loading && result && (
+      {hasQueried && (
         <>
           <Card
-            style={{ marginTop: 12 }}
-            size={isMobile ? "small" : "default"}
             title={
               <Space wrap>
-                <RobotOutlined style={{ color: "#1677ff" }} />
-                <span>AI 摘要</span>
-                <Tag color="processing">{result.stock_name ?? result.stock_code}</Tag>
+                <span>K 线图</span>
+                {queryInfoTags}
               </Space>
             }
-          >
-            <MarkdownContent content={result.summary} compact />
-          </Card>
-
-          <Card
-            title={`K 线图 · ${selectedLabel}`}
             size={isMobile ? "small" : "default"}
             style={{ marginTop: 12 }}
             extra={
@@ -283,33 +358,88 @@ export default function StockAnalysisPage() {
               </Text>
             }
           >
-            <KLineChart
-              kline={result.kline}
-              nodes={result.nodes}
-              stockName={result.stock_name}
-            />
-            {result.nodes.length > 0 && (
-              <Space wrap style={{ marginTop: 8 }}>
-                {result.nodes.map((node) => (
-                  <Tag key={`${node.date}-${node.type}`} color={NODE_TAG_COLORS[node.type] ?? "purple"}>
-                    {node.date} {node.label}
-                  </Tag>
-                ))}
-              </Space>
+            {briefLoading && (
+              <div style={{ padding: "48px 0", textAlign: "center" }}>
+                <Spin tip="正在加载 K 线数据..." />
+              </div>
+            )}
+            {!briefLoading && briefError && (
+              <Alert type="error" message={briefError} showIcon />
+            )}
+            {!briefLoading && !briefError && briefResult && (
+              <>
+                <KLineChart
+                  kline={briefResult.kline}
+                  nodes={briefResult.nodes}
+                  stockName={stockOptionByCode.get(briefResult.stock_code)?.name}
+                />
+                {briefResult.nodes.length > 0 && (
+                  <Space wrap style={{ marginTop: 8 }}>
+                    {briefResult.nodes.map((node) => (
+                      <Tag
+                        key={`${node.date}-${node.type}`}
+                        color={NODE_TAG_COLORS[node.type] ?? "purple"}
+                      >
+                        {node.date} {node.label}
+                      </Tag>
+                    ))}
+                  </Space>
+                )}
+              </>
             )}
           </Card>
 
           <Card
-            title="完整 AI 分析"
+            style={{ marginTop: 12 }}
+            size={isMobile ? "small" : "default"}
+            title={
+              <Space wrap>
+                <RobotOutlined style={{ color: "#1677ff" }} />
+                <span>AI 摘要</span>
+                {queryInfoTags}
+              </Space>
+            }
+          >
+            {briefLoading && (
+              <div style={{ padding: "24px 0", textAlign: "center" }}>
+                <Spin tip="正在生成简要分析..." />
+              </div>
+            )}
+            {!briefLoading && briefError && (
+              <Alert type="error" message={briefError} showIcon />
+            )}
+            {!briefLoading && !briefError && briefResult && (
+              <MarkdownContent content={briefResult.summary} compact />
+            )}
+          </Card>
+
+          <Card
             size={isMobile ? "small" : "default"}
             style={{ marginTop: 12 }}
+            title={
+              <Space wrap>
+                <RobotOutlined style={{ color: "#1677ff" }} />
+                <span>完整 AI 分析</span>
+                {queryInfoTags}
+              </Space>
+            }
           >
-            <MarkdownContent content={result.analysis} />
+            {detailLoading && (
+              <div style={{ padding: "24px 0", textAlign: "center" }}>
+                <Spin tip="正在生成完整分析，可能需要 1~2 分钟..." />
+              </div>
+            )}
+            {!detailLoading && detailError && (
+              <Alert type="error" message={detailError} showIcon />
+            )}
+            {!detailLoading && !detailError && detailResult && (
+              <MarkdownContent content={detailResult.analysis} />
+            )}
           </Card>
         </>
       )}
 
-      {!loading && !result && !error && (
+      {!hasQueried && (
         <Card style={{ marginTop: 12 }}>
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}
