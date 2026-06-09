@@ -38,8 +38,3 @@ export interface BriefAnalysisResult {
 export interface DetailAnalysisResult {
   analysis: string;
 }
-
-export interface StockOption {
-  value: string;
-  label: string;
-}

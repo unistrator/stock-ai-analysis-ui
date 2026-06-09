@@ -1,11 +1,11 @@
 const TOKEN_KEY = "ph_api_token";
 
-export function getToken(): string | null {
+function getToken(): string | null {
   const token = localStorage.getItem(TOKEN_KEY);
   return token?.trim() || null;
 }
 
-export function setToken(token: string) {
+function setToken(token: string) {
   const trimmed = token.trim();
   if (trimmed) {
     localStorage.setItem(TOKEN_KEY, trimmed);

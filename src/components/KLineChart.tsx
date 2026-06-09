@@ -165,6 +165,8 @@ export default function KLineChart({ kline, nodes, stockName }: Props) {
           xAxisIndex: [0, 1],
           start: 0,
           end: 100,
+          // 移动端单指拖动时保持纵轴尺度不变（不按可见区间重算 y 轴范围）
+          filterMode: isMobile ? "none" : "filter",
         },
         {
           show: !isMobile,

@@ -1,7 +1,7 @@
 import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 
-const PROXY_TIMEOUT_MS = 900_000; // 900s（15min），适配分析接口冷启动与 LLM 长耗时
+const PROXY_TIMEOUT_MS = 300_000; // 300s（5min），适配分析接口冷启动与 LLM 长耗时
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");

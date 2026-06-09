@@ -4,6 +4,7 @@ import {
   AutoComplete,
   Button,
   Card,
+  Collapse,
   Col,
   DatePicker,
   Empty,
@@ -62,6 +63,10 @@ interface ActiveQuery {
   controller: AbortController;
 }
 
+interface DetailQuery {
+  controller: AbortController;
+}
+
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
 }
@@ -117,7 +122,9 @@ export default function StockAnalysisPage() {
   const [mappingLoading, setMappingLoading] = useState(true);
   const [mappingError, setMappingError] = useState("");
   const [queryHistory, setQueryHistory] = useState(() => loadStockQueryHistory());
+  const [detailExpanded, setDetailExpanded] = useState(true);
   const activeQueryRef = useRef<ActiveQuery | null>(null);
+  const detailQueryRef = useRef<DetailQuery | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -143,6 +150,7 @@ export default function StockAnalysisPage() {
   useEffect(() => {
     return () => {
       activeQueryRef.current?.controller.abort();
+      detailQueryRef.current?.controller.abort();
     };
   }, []);
 
@@ -199,13 +207,15 @@ export default function StockAnalysisPage() {
     }
 
     active?.controller.abort();
+    detailQueryRef.current?.controller.abort();
+    detailQueryRef.current = null;
 
     const controller = new AbortController();
     activeQueryRef.current = { code, startDate, endDate, controller };
 
     setHasQueried(true);
+    setDetailExpanded(false);
     setBriefLoading(true);
-    setDetailLoading(true);
     setBriefError("");
     setDetailError("");
     setBriefResult(null);
@@ -213,45 +223,68 @@ export default function StockAnalysisPage() {
 
     const isActive = () => activeQueryRef.current?.controller === controller;
 
-    const briefPromise = fetchBriefAnalysis(code, startDate, endDate, controller.signal)
-      .then((data) => {
-        if (!isActive()) return;
-        setBriefResult(data);
-        setBriefError("");
-        setQueryHistory(
-          appendStockQueryHistory(code, stockOptionByCode.get(code)?.name),
-        );
-      })
-      .catch((e) => {
-        if (isAbortError(e) || controller.signal.aborted) return;
-        if (!isActive()) return;
-        setBriefResult(null);
-        setBriefError(e instanceof Error ? e.message : "简要分析加载失败");
-      })
-      .finally(() => {
-        if (isActive()) setBriefLoading(false);
-      });
+    try {
+      const data = await fetchBriefAnalysis(code, startDate, endDate, controller.signal);
+      if (!isActive()) return;
+      setBriefResult(data);
+      setBriefError("");
+      setQueryHistory(
+        appendStockQueryHistory(code, stockOptionByCode.get(code)?.name),
+      );
+    } catch (e) {
+      if (isAbortError(e) || controller.signal.aborted) return;
+      if (!isActive()) return;
+      setBriefResult(null);
+      setBriefError(e instanceof Error ? e.message : "简要分析加载失败");
+    } finally {
+      if (isActive()) {
+        setBriefLoading(false);
+        activeQueryRef.current = null;
+      }
+    }
+  };
 
-    const detailPromise = fetchDetailAnalysis(code, startDate, endDate, controller.signal)
-      .then((data) => {
-        if (!isActive()) return;
-        setDetailResult(data);
-        setDetailError("");
-      })
-      .catch((e) => {
-        if (isAbortError(e) || controller.signal.aborted) return;
-        if (!isActive()) return;
-        setDetailResult(null);
-        setDetailError(e instanceof Error ? e.message : "完整分析加载失败");
-      })
-      .finally(() => {
-        if (isActive()) setDetailLoading(false);
-      });
+  const handleGenerateDetail = async () => {
+    if (!briefResult) {
+      message.warning("请先完成查询");
+      return;
+    }
+    if (!dateRange[0] || !dateRange[1]) {
+      message.warning("请选择完整的日期范围");
+      return;
+    }
 
-    await Promise.allSettled([briefPromise, detailPromise]);
+    const code = normalizeStockCode(briefResult.stock_code);
+    const startDate = dateRange[0].format("YYYY-MM-DD");
+    const endDate = dateRange[1].format("YYYY-MM-DD");
 
-    if (isActive()) {
-      activeQueryRef.current = null;
+    detailQueryRef.current?.controller.abort();
+
+    const controller = new AbortController();
+    detailQueryRef.current = { controller };
+
+    setDetailLoading(true);
+    setDetailError("");
+    setDetailResult(null);
+
+    const isActive = () => detailQueryRef.current?.controller === controller;
+
+    try {
+      const data = await fetchDetailAnalysis(code, startDate, endDate, controller.signal);
+      if (!isActive()) return;
+      setDetailResult(data);
+      setDetailExpanded(true);
+      setDetailError("");
+    } catch (e) {
+      if (isAbortError(e) || controller.signal.aborted) return;
+      if (!isActive()) return;
+      setDetailResult(null);
+      setDetailError(e instanceof Error ? e.message : "完整分析加载失败");
+    } finally {
+      if (isActive()) {
+        setDetailLoading(false);
+        detailQueryRef.current = null;
+      }
     }
   };
 
@@ -413,29 +446,57 @@ export default function StockAnalysisPage() {
             )}
           </Card>
 
-          <Card
-            size={isMobile ? "small" : "default"}
-            style={{ marginTop: 12 }}
-            title={
-              <Space wrap>
-                <RobotOutlined style={{ color: "#1677ff" }} />
-                <span>完整 AI 分析</span>
-                {queryInfoTags}
-              </Space>
-            }
-          >
-            {detailLoading && (
+          {detailResult ? (
+            <Collapse
+              style={{ marginTop: 12 }}
+              size={isMobile ? "small" : "middle"}
+              activeKey={detailExpanded ? ["detail"] : []}
+              onChange={(keys) => setDetailExpanded(keys.includes("detail"))}
+              items={[
+                {
+                  key: "detail",
+                  label: (
+                    <Space wrap>
+                      <RobotOutlined style={{ color: "#1677ff" }} />
+                      <span>完整 AI 分析</span>
+                      {queryInfoTags}
+                    </Space>
+                  ),
+                  children: <MarkdownContent content={detailResult.analysis} />,
+                },
+              ]}
+            />
+          ) : (
+            <Card
+              style={{ marginTop: 12 }}
+              size={isMobile ? "small" : "default"}
+              title={
+                <Space wrap>
+                  <RobotOutlined style={{ color: "#1677ff" }} />
+                  <span>完整 AI 分析</span>
+                  {queryInfoTags}
+                </Space>
+              }
+            >
+              {detailError && (
+                <Alert type="error" message={detailError} showIcon style={{ marginBottom: 16 }} />
+              )}
               <div style={{ padding: "24px 0", textAlign: "center" }}>
-                <Spin tip="正在生成完整分析，可能需要 1~2 分钟..." />
+                {detailLoading ? (
+                  <Spin tip="正在生成完整分析，可能需要 1~2 分钟..." />
+                ) : (
+                  <Button
+                    type="primary"
+                    icon={<RobotOutlined />}
+                    onClick={handleGenerateDetail}
+                    disabled={briefLoading || !briefResult || !!briefError}
+                  >
+                    生成完整 AI 分析
+                  </Button>
+                )}
               </div>
-            )}
-            {!detailLoading && detailError && (
-              <Alert type="error" message={detailError} showIcon />
-            )}
-            {!detailLoading && !detailError && detailResult && (
-              <MarkdownContent content={detailResult.analysis} />
-            )}
-          </Card>
+            </Card>
+          )}
         </>
       )}
 
