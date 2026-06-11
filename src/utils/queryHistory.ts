@@ -4,6 +4,8 @@ const MAX_HISTORY = 5;
 export interface StockQueryHistoryItem {
   stockCode: string;
   stockName?: string;
+  startDate?: string;
+  endDate?: string;
   queriedAt: number;
 }
 
@@ -27,13 +29,15 @@ export function loadStockQueryHistory(): StockQueryHistoryItem[] {
 
 export function appendStockQueryHistory(
   stockCode: string,
-  stockName?: string,
+  options?: { stockName?: string; startDate?: string; endDate?: string },
 ): StockQueryHistoryItem[] {
   const normalized = stockCode.trim().toUpperCase();
   if (!normalized) return loadStockQueryHistory();
 
+  const { stockName, startDate, endDate } = options ?? {};
+
   const next: StockQueryHistoryItem[] = [
-    { stockCode: normalized, stockName, queriedAt: Date.now() },
+    { stockCode: normalized, stockName, startDate, endDate, queriedAt: Date.now() },
     ...loadStockQueryHistory().filter((item) => item.stockCode !== normalized),
   ].slice(0, MAX_HISTORY);
 

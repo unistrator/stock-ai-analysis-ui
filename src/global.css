@@ -133,7 +133,7 @@ body {
 
 .query-history {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   margin-top: 20px;
   min-width: 0;
@@ -142,15 +142,14 @@ body {
 .query-history__label {
   flex-shrink: 0;
   font-size: 12px;
+  line-height: 22px;
 }
 
 .query-history__tags {
   display: flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   gap: 4px;
   min-width: 0;
-  overflow-x: auto;
-  scrollbar-width: thin;
 }
 
 @media (max-width: 767px) {

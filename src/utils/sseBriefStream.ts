@@ -36,7 +36,7 @@ export function parseSseBuffer(buffer: string): SseParseResult {
   return { events, rest };
 }
 
-interface BriefSseEvent {
+export interface AnalysisSseEvent {
   type?: string;
   field?: string;
   text?: string;
@@ -47,15 +47,21 @@ interface BriefSseEvent {
   important_point?: Record<string, string>;
 }
 
-export interface BriefSseStreamHandlers {
-  onSummaryChunk?: (summary: string) => void;
+export interface AnalysisSseStreamOptions {
+  /** 需要累积的 markdown 字段名（如 total_analyze / analysis） */
+  field: string;
+  /** 流式增量回调，返回到目前为止累积的完整文本 */
+  onChunk?: (accumulated: string) => void;
+  /** 是否要求 meta 事件携带 daily_data 才视为完整数据 */
+  requireDailyData?: boolean;
 }
 
-export async function readBriefSseStream(
+/** 通用 SSE 读取：累积指定 markdown 字段，并返回最终 meta 事件。 */
+export async function readAnalysisSseStream(
   res: Response,
-  handlers?: BriefSseStreamHandlers,
+  options: AnalysisSseStreamOptions,
   signal?: AbortSignal,
-): Promise<BriefSseEvent> {
+): Promise<AnalysisSseEvent> {
   const reader = res.body?.getReader();
   if (!reader) {
     throw new Error("流式响应不可用");
@@ -63,18 +69,19 @@ export async function readBriefSseStream(
 
   const decoder = new TextDecoder();
   let sseBuffer = "";
-  let summaryMarkdown = "";
-  let finalData: BriefSseEvent | null = null;
+  let accumulated = "";
+  let finalData: AnalysisSseEvent | null = null;
 
-  const handleEvent = (event: BriefSseEvent) => {
+  const handleEvent = (event: AnalysisSseEvent) => {
     if (event.type === "markdown_delta" && typeof event.text === "string") {
-      if (event.field && event.field !== "total_analyze") return;
-      summaryMarkdown += event.text;
-      handlers?.onSummaryChunk?.(summaryMarkdown);
+      if (event.field && event.field !== options.field) return;
+      accumulated += event.text;
+      options.onChunk?.(accumulated);
       return;
     }
 
-    if (event.type === "meta" && Array.isArray(event.daily_data)) {
+    if (event.type === "meta") {
+      if (options.requireDailyData && !Array.isArray(event.daily_data)) return;
       finalData = event;
     }
   };
@@ -83,7 +90,7 @@ export async function readBriefSseStream(
     const { events, rest } = parseSseBuffer(sseBuffer);
     sseBuffer = rest;
     for (const event of events) {
-      handleEvent(event as BriefSseEvent);
+      handleEvent(event as AnalysisSseEvent);
     }
   };
 
@@ -107,9 +114,64 @@ export async function readBriefSseStream(
     consumeParsedEvents();
   }
 
-  if (!finalData) {
+  if (finalData) {
+    return finalData;
+  }
+
+  if (options.requireDailyData) {
     throw new Error("流式响应未返回完整分析数据");
   }
 
-  return finalData;
+  // 无 meta 事件时（如完整分析），用累积文本兜底返回
+  return { type: "meta", [options.field]: accumulated } as AnalysisSseEvent;
+}
+
+export interface BriefSseStreamHandlers {
+  onSummaryChunk?: (summary: string) => void;
+}
+
+export function readBriefSseStream(
+  res: Response,
+  handlers?: BriefSseStreamHandlers,
+  signal?: AbortSignal,
+): Promise<AnalysisSseEvent> {
+  return readAnalysisSseStream(
+    res,
+    {
+      field: "total_analyze",
+      onChunk: handlers?.onSummaryChunk,
+      requireDailyData: true,
+    },
+    signal,
+  );
+}
+
+export interface DetailSseStreamHandlers {
+  onAnalysisChunk?: (analysis: string) => void;
+}
+
+export async function readDetailSseStream(
+  res: Response,
+  handlers?: DetailSseStreamHandlers,
+  signal?: AbortSignal,
+): Promise<{ analysis: string; meta?: unknown }> {
+  let accumulated = "";
+
+  const finalData = await readAnalysisSseStream(
+    res,
+    {
+      field: "analysis",
+      onChunk: (text) => {
+        accumulated = text;
+        handlers?.onAnalysisChunk?.(text);
+      },
+      requireDailyData: false,
+    },
+    signal,
+  );
+
+  return {
+    analysis: finalData.analysis || accumulated,
+    meta: finalData.meta,
+  };
 }

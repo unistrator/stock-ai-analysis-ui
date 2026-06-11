@@ -131,6 +131,7 @@ export default function StockAnalysisPage() {
   const [briefResult, setBriefResult] = useState<BriefAnalysisResult | null>(null);
   const [streamingSummary, setStreamingSummary] = useState("");
   const [detailResult, setDetailResult] = useState<DetailAnalysisResult | null>(null);
+  const [streamingDetail, setStreamingDetail] = useState("");
   const [hasQueried, setHasQueried] = useState(true);
   const [stockOptions, setStockOptions] = useState<StockOption[]>([]);
   const [mappingLoading, setMappingLoading] = useState(true);
@@ -140,6 +141,8 @@ export default function StockAnalysisPage() {
   const [highlightedNodeKey, setHighlightedNodeKey] = useState<string | null>(null);
   const [typewriterResetKey, setTypewriterResetKey] = useState(0);
   const [summaryIsStreaming, setSummaryIsStreaming] = useState(false);
+  const [detailTypewriterResetKey, setDetailTypewriterResetKey] = useState(0);
+  const [detailIsStreaming, setDetailIsStreaming] = useState(false);
   const activeQueryRef = useRef<ActiveQuery | null>(null);
   const detailQueryRef = useRef<DetailQuery | null>(null);
   const detailPrefetchRef = useRef<DetailQuery | null>(null);
@@ -185,6 +188,14 @@ export default function StockAnalysisPage() {
   const summaryContent = useTypewriterText(summaryTarget, typewriterResetKey, summaryIsStreaming);
   const showSummaryContent = Boolean(summaryContent.trim());
 
+  const detailTarget = detailResult?.analysis ?? streamingDetail;
+  const detailContent = useTypewriterText(
+    detailTarget,
+    detailTypewriterResetKey,
+    detailIsStreaming,
+  );
+  const showDetailPanel = detailLoading || Boolean(detailContent.trim());
+
   const queryInfoTags = briefResult ? (
     <>
       <Tag color="geekblue" style={SUMMARY_HEADER_TAG_STYLE}>
@@ -196,20 +207,22 @@ export default function StockAnalysisPage() {
     </>
   ) : null;
 
-  const handleQuery = async () => {
-    if (!stockCode.trim()) {
+  const handleQuery = async (override?: { code?: string; range?: [Dayjs, Dayjs] }) => {
+    const rawCode = override?.code ?? stockCode;
+    if (!rawCode.trim()) {
       message.warning("请输入股票代码");
       return;
     }
 
-    const code = normalizeStockCode(stockCode);
-    if (!dateRange[0] || !dateRange[1]) {
+    const code = normalizeStockCode(rawCode);
+    const range = override?.range ?? dateRange;
+    if (!range[0] || !range[1]) {
       message.warning("请选择完整的日期范围");
       return;
     }
 
-    const startDate = dateRange[0].format("YYYY-MM-DD");
-    const endDate = dateRange[1].format("YYYY-MM-DD");
+    const startDate = range[0].format("YYYY-MM-DD");
+    const endDate = range[1].format("YYYY-MM-DD");
     const active = activeQueryRef.current;
 
     if (
@@ -262,7 +275,11 @@ export default function StockAnalysisPage() {
       setStreamingSummary("");
       setBriefError("");
       setQueryHistory(
-        appendStockQueryHistory(code, stockOptionByCode.get(code)?.name),
+        appendStockQueryHistory(code, {
+          stockName: stockOptionByCode.get(code)?.name,
+          startDate,
+          endDate,
+        }),
       );
     } catch (e) {
       if (isAbortError(e) || controller.signal.aborted) return;
@@ -277,6 +294,16 @@ export default function StockAnalysisPage() {
         activeQueryRef.current = null;
       }
     }
+  };
+
+  const handleHistoryClick = (item: StockQueryHistoryItem) => {
+    setStockCode(item.stockCode);
+    const range: [Dayjs, Dayjs] =
+      item.startDate && item.endDate
+        ? [dayjs(item.startDate), dayjs(item.endDate)]
+        : getDefaultDateRange();
+    setDateRange(range);
+    void handleQuery({ code: item.stockCode, range });
   };
 
   const handleGenerateDetail = async () => {
@@ -301,19 +328,37 @@ export default function StockAnalysisPage() {
     setDetailLoading(true);
     setDetailError("");
     setDetailResult(null);
+    setStreamingDetail("");
+    setDetailIsStreaming(true);
+    setDetailTypewriterResetKey((key) => key + 1);
+    setDetailExpanded(true);
 
     const isActive = () => detailQueryRef.current?.controller === controller;
 
     try {
-      const data = await fetchDetailAnalysis(code, startDate, endDate, controller.signal);
+      const data = await fetchDetailAnalysis(
+        code,
+        startDate,
+        endDate,
+        controller.signal,
+        {
+          onAnalysisChunk: (analysis) => {
+            if (!isActive()) return;
+            setStreamingDetail(analysis);
+          },
+        },
+      );
       if (!isActive()) return;
       setDetailResult(data);
+      setStreamingDetail("");
       setDetailExpanded(true);
       setDetailError("");
     } catch (e) {
       if (isAbortError(e) || controller.signal.aborted) return;
       if (!isActive()) return;
       setDetailResult(null);
+      setStreamingDetail("");
+      setDetailIsStreaming(false);
       setDetailError(e instanceof Error ? e.message : "完整分析加载失败");
     } finally {
       if (isActive()) {
@@ -417,7 +462,7 @@ export default function StockAnalysisPage() {
                 <Tag
                   key={item.stockCode}
                   style={{ cursor: "pointer", marginInlineEnd: 0, flexShrink: 0 }}
-                  onClick={() => setStockCode(item.stockCode)}
+                  onClick={() => handleHistoryClick(item)}
                 >
                   {formatHistoryLabel(item, stockOptionByCode)}
                 </Tag>
@@ -513,7 +558,7 @@ export default function StockAnalysisPage() {
             )}
           </Card>
 
-          {detailResult ? (
+          {showDetailPanel ? (
             <Collapse
               style={{ marginTop: 12 }}
               size={isMobile ? "small" : "middle"}
@@ -529,7 +574,14 @@ export default function StockAnalysisPage() {
                       {queryInfoTags}
                     </Space>
                   ),
-                  children: <MarkdownContent content={detailResult.analysis} />,
+                  children: (
+                    <>
+                      {detailError && (
+                        <Alert type="error" message={detailError} showIcon style={{ marginBottom: 16 }} />
+                      )}
+                      {detailContent.trim() && <MarkdownContent content={detailContent} />}
+                    </>
+                  ),
                 },
               ]}
             />
@@ -549,17 +601,13 @@ export default function StockAnalysisPage() {
                 <Alert type="error" message={detailError} showIcon style={{ marginBottom: 16 }} />
               )}
               <div style={{ padding: "24px 0", textAlign: "center" }}>
-                {detailLoading ? (
-                  <Spin tip="正在生成完整分析，可能需要 1~2 分钟..." />
-                ) : (
-                  <Button
-                    type="primary"
-                    icon={<RobotOutlined />}
-                    onClick={handleGenerateDetail}
-                  >
-                    生成完整 AI 分析
-                  </Button>
-                )}
+                <Button
+                  type="primary"
+                  icon={<RobotOutlined />}
+                  onClick={handleGenerateDetail}
+                >
+                  生成完整 AI 分析
+                </Button>
               </div>
             </Card>
           )}

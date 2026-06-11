@@ -6,7 +6,7 @@ import type {
 } from "../types";
 import { authHeaders, requireToken } from "./auth";
 import { createMockAnalysis, mockDelay } from "./mockData";
-import { readBriefSseStream } from "./sseBriefStream";
+import { readBriefSseStream, readDetailSseStream } from "./sseBriefStream";
 
 const ANALYZE_BRIEF_URL =
   import.meta.env.VITE_ANALYZE_BRIEF_URL ?? "/trees/analyze/brief";
@@ -14,6 +14,7 @@ const ANALYZE_DETAIL_URL =
   import.meta.env.VITE_ANALYZE_DETAIL_URL ?? "/trees/analyze/detail";
 const USE_MOCK = import.meta.env.VITE_USE_MOCK === "true";
 const MOCK_BRIEF_STREAM = import.meta.env.VITE_MOCK_BRIEF_STREAM === "true";
+const MOCK_DETAIL_STREAM = import.meta.env.VITE_MOCK_DETAIL_STREAM === "true";
 
 interface TreesDailyBar {
   date: string;
@@ -243,7 +244,7 @@ function buildMockBriefResponse(mock: ReturnType<typeof createMockAnalysis>): Tr
   };
 }
 
-function isCachedBriefResponse(res: Response): boolean {
+function isCachedJsonResponse(res: Response): boolean {
   const contentType = res.headers.get("Content-Type") ?? "";
   return contentType.includes("application/json");
 }
@@ -268,7 +269,7 @@ async function requestBriefAnalysis(
   }
 
   // 命中缓存：一次性返回完整 JSON；未命中：SSE 流式生成 AI 分析
-  if (isCachedBriefResponse(res)) {
+  if (isCachedJsonResponse(res)) {
     return res.json() as Promise<TreesBriefResponse>;
   }
 
@@ -317,23 +318,84 @@ export async function fetchBriefAnalysis(
   return mapBriefResponse(data, startDate, endDate);
 }
 
+export interface DetailAnalysisStreamOptions {
+  onAnalysisChunk?: (analysis: string) => void;
+}
+
+async function simulateMockDetailStream(
+  analysis: string,
+  onAnalysisChunk: ((analysis: string) => void) | undefined,
+  signal?: AbortSignal,
+): Promise<void> {
+  const chunkSize = 32;
+  let partial = "";
+
+  for (let offset = 0; offset < analysis.length; offset += chunkSize) {
+    await mockDelay(40, signal);
+    partial += analysis.slice(offset, offset + chunkSize);
+    onAnalysisChunk?.(partial);
+  }
+}
+
+async function requestDetailAnalysis(
+  stockCode: string,
+  startDate: string,
+  endDate: string,
+  options?: DetailAnalysisStreamOptions,
+  signal?: AbortSignal,
+): Promise<TreesDetailResponse> {
+  const res = await fetch(withAuthUrl(ANALYZE_DETAIL_URL), {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: buildAnalyzeRequestBody(stockCode, startDate, endDate),
+    signal,
+  });
+
+  handleAuthError(res);
+  if (!res.ok) {
+    throw new Error(await parseAnalyzeError(res));
+  }
+
+  // 命中缓存：一次性返回完整 JSON；未命中：SSE 流式生成 AI 分析
+  if (isCachedJsonResponse(res)) {
+    return res.json() as Promise<TreesDetailResponse>;
+  }
+
+  const result = await readDetailSseStream(
+    res,
+    { onAnalysisChunk: options?.onAnalysisChunk },
+    signal,
+  );
+  return {
+    analysis: result.analysis || "",
+    meta: result.meta as TreesDetailResponse["meta"],
+  };
+}
+
 export async function fetchDetailAnalysis(
   stockCode: string,
   startDate: string,
   endDate: string,
   signal?: AbortSignal,
+  options?: DetailAnalysisStreamOptions,
 ): Promise<DetailAnalysisResult> {
   if (USE_MOCK) {
-    await mockDelay(900, signal);
+    await mockDelay(MOCK_DETAIL_STREAM ? 300 : 900, signal);
     const mock = createMockAnalysis(stockCode, startDate, endDate);
+
+    if (MOCK_DETAIL_STREAM) {
+      await simulateMockDetailStream(mock.analysis, options?.onAnalysisChunk, signal);
+      return { analysis: mock.analysis };
+    }
+
     return { analysis: mock.analysis };
   }
 
-  const data = await requestTreesSection<TreesDetailResponse>(
-    ANALYZE_DETAIL_URL,
+  const data = await requestDetailAnalysis(
     stockCode,
     startDate,
     endDate,
+    options,
     signal,
   );
   return mapDetailResponse(data);
