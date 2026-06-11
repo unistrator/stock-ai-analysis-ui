@@ -444,7 +444,7 @@ export default function StockAnalysisPage() {
             <Button
               type="primary"
               icon={<SearchOutlined />}
-              onClick={handleQuery}
+              onClick={() => void handleQuery()}
               block={isMobile}
               style={isMobile ? undefined : { minWidth: 120 }}
             >
