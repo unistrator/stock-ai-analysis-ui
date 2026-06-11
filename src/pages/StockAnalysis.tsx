@@ -17,7 +17,7 @@ import {
 } from "antd";
 import { LineChartOutlined, RobotOutlined, SearchOutlined } from "@ant-design/icons";
 import dayjs, { type Dayjs } from "dayjs";
-import KLineChart from "../components/KLineChart";
+import KLineChart, { getNodeKey } from "../components/KLineChart";
 import MarkdownContent from "../components/MarkdownContent";
 import {
   fetchBriefAnalysis,
@@ -26,6 +26,7 @@ import {
   type StockOption,
 } from "../utils/api";
 import useIsMobile from "../hooks/useIsMobile";
+import { useTypewriterText } from "../hooks/useTypewriterText";
 import type { BriefAnalysisResult, DetailAnalysisResult } from "../types";
 import {
   appendStockQueryHistory,
@@ -46,6 +47,12 @@ const NODE_TAG_COLORS: Record<string, string> = {
 
 const MAX_SUGGESTIONS = 50;
 
+const DEFAULT_STOCK_CODE = "00700.HK";
+
+function getDefaultDateRange(): [Dayjs, Dayjs] {
+  return [dayjs().subtract(6, "month"), dayjs()];
+}
+
 const SUMMARY_HEADER_TAG_STYLE = {
   fontSize: 14,
   lineHeight: "22px",
@@ -65,6 +72,15 @@ interface ActiveQuery {
 
 interface DetailQuery {
   controller: AbortController;
+}
+
+function getDefaultQueryParams(): { code: string; startDate: string; endDate: string } {
+  const [start, end] = getDefaultDateRange();
+  return {
+    code: DEFAULT_STOCK_CODE,
+    startDate: start.format("YYYY-MM-DD"),
+    endDate: end.format("YYYY-MM-DD"),
+  };
 }
 
 function isAbortError(error: unknown): boolean {
@@ -106,25 +122,27 @@ function formatHistoryLabel(
 
 export default function StockAnalysisPage() {
   const isMobile = useIsMobile();
-  const [stockCode, setStockCode] = useState("000001.SZ");
-  const [dateRange, setDateRange] = useState<[Dayjs, Dayjs]>([
-    dayjs().subtract(365, "day"),
-    dayjs(),
-  ]);
-  const [briefLoading, setBriefLoading] = useState(false);
+  const [stockCode, setStockCode] = useState(DEFAULT_STOCK_CODE);
+  const [dateRange, setDateRange] = useState<[Dayjs, Dayjs]>(getDefaultDateRange);
+  const [briefLoading, setBriefLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [briefError, setBriefError] = useState("");
   const [detailError, setDetailError] = useState("");
   const [briefResult, setBriefResult] = useState<BriefAnalysisResult | null>(null);
+  const [streamingSummary, setStreamingSummary] = useState("");
   const [detailResult, setDetailResult] = useState<DetailAnalysisResult | null>(null);
-  const [hasQueried, setHasQueried] = useState(false);
+  const [hasQueried, setHasQueried] = useState(true);
   const [stockOptions, setStockOptions] = useState<StockOption[]>([]);
   const [mappingLoading, setMappingLoading] = useState(true);
   const [mappingError, setMappingError] = useState("");
   const [queryHistory, setQueryHistory] = useState(() => loadStockQueryHistory());
   const [detailExpanded, setDetailExpanded] = useState(true);
+  const [highlightedNodeKey, setHighlightedNodeKey] = useState<string | null>(null);
+  const [typewriterResetKey, setTypewriterResetKey] = useState(0);
+  const [summaryIsStreaming, setSummaryIsStreaming] = useState(false);
   const activeQueryRef = useRef<ActiveQuery | null>(null);
   const detailQueryRef = useRef<DetailQuery | null>(null);
+  const detailPrefetchRef = useRef<DetailQuery | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -147,13 +165,6 @@ export default function StockAnalysisPage() {
     };
   }, []);
 
-  useEffect(() => {
-    return () => {
-      activeQueryRef.current?.controller.abort();
-      detailQueryRef.current?.controller.abort();
-    };
-  }, []);
-
   const stockOptionByCode = useMemo(
     () => new Map(stockOptions.map((opt) => [opt.value, opt])),
     [stockOptions],
@@ -169,6 +180,10 @@ export default function StockAnalysisPage() {
     const matched = stockOptionByCode.get(briefResult.stock_code);
     return matched ? `${briefResult.stock_code} ${matched.name}` : briefResult.stock_code;
   }, [briefResult, stockOptionByCode]);
+
+  const summaryTarget = briefResult?.summary ?? streamingSummary;
+  const summaryContent = useTypewriterText(summaryTarget, typewriterResetKey, summaryIsStreaming);
+  const showSummaryContent = Boolean(summaryContent.trim());
 
   const queryInfoTags = briefResult ? (
     <>
@@ -199,6 +214,7 @@ export default function StockAnalysisPage() {
 
     if (
       active &&
+      !active.controller.signal.aborted &&
       active.code === code &&
       active.startDate === startDate &&
       active.endDate === endDate
@@ -214,19 +230,36 @@ export default function StockAnalysisPage() {
     activeQueryRef.current = { code, startDate, endDate, controller };
 
     setHasQueried(true);
+    setTypewriterResetKey((key) => key + 1);
     setDetailExpanded(false);
     setBriefLoading(true);
     setBriefError("");
     setDetailError("");
     setBriefResult(null);
+    setStreamingSummary("");
+    setSummaryIsStreaming(false);
     setDetailResult(null);
+    setHighlightedNodeKey(null);
 
     const isActive = () => activeQueryRef.current?.controller === controller;
 
     try {
-      const data = await fetchBriefAnalysis(code, startDate, endDate, controller.signal);
+      const data = await fetchBriefAnalysis(
+        code,
+        startDate,
+        endDate,
+        controller.signal,
+        {
+          onSummaryChunk: (summary) => {
+            if (!isActive()) return;
+            setSummaryIsStreaming(true);
+            setStreamingSummary(summary);
+          },
+        },
+      );
       if (!isActive()) return;
       setBriefResult(data);
+      setStreamingSummary("");
       setBriefError("");
       setQueryHistory(
         appendStockQueryHistory(code, stockOptionByCode.get(code)?.name),
@@ -235,6 +268,8 @@ export default function StockAnalysisPage() {
       if (isAbortError(e) || controller.signal.aborted) return;
       if (!isActive()) return;
       setBriefResult(null);
+      setStreamingSummary("");
+      setSummaryIsStreaming(false);
       setBriefError(e instanceof Error ? e.message : "简要分析加载失败");
     } finally {
       if (isActive()) {
@@ -245,8 +280,8 @@ export default function StockAnalysisPage() {
   };
 
   const handleGenerateDetail = async () => {
-    if (!briefResult) {
-      message.warning("请先完成查询");
+    if (!stockCode.trim()) {
+      message.warning("请输入股票代码");
       return;
     }
     if (!dateRange[0] || !dateRange[1]) {
@@ -254,7 +289,7 @@ export default function StockAnalysisPage() {
       return;
     }
 
-    const code = normalizeStockCode(briefResult.stock_code);
+    const code = normalizeStockCode(stockCode);
     const startDate = dateRange[0].format("YYYY-MM-DD");
     const endDate = dateRange[1].format("YYYY-MM-DD");
 
@@ -287,6 +322,36 @@ export default function StockAnalysisPage() {
       }
     }
   };
+
+  const handleQueryRef = useRef(handleQuery);
+  handleQueryRef.current = handleQuery;
+
+  useEffect(() => {
+    void handleQueryRef.current();
+
+    const { code, startDate, endDate } = getDefaultQueryParams();
+    const prefetchController = new AbortController();
+    detailPrefetchRef.current = { controller: prefetchController };
+
+    void fetchDetailAnalysis(code, startDate, endDate, prefetchController.signal)
+      .catch((e) => {
+        if (isAbortError(e) || prefetchController.signal.aborted) return;
+      })
+      .finally(() => {
+        if (detailPrefetchRef.current?.controller === prefetchController) {
+          detailPrefetchRef.current = null;
+        }
+      });
+
+    return () => {
+      activeQueryRef.current?.controller.abort();
+      activeQueryRef.current = null;
+      detailQueryRef.current?.controller.abort();
+      detailQueryRef.current = null;
+      detailPrefetchRef.current?.controller.abort();
+      detailPrefetchRef.current = null;
+    };
+  }, []);
 
   return (
     <div>
@@ -343,24 +408,22 @@ export default function StockAnalysisPage() {
           </Col>
         </Row>
         {queryHistory.length > 0 && (
-          <Row gutter={[12, 12]} style={{ marginTop: 20 }}>
-            <Col xs={24} md={8}>
-              <Text type="secondary" style={{ fontSize: 12, marginRight: 8 }}>
-                最近查询
-              </Text>
-              <Space wrap size={[4, 4]}>
-                {queryHistory.map((item) => (
-                  <Tag
-                    key={item.stockCode}
-                    style={{ cursor: "pointer", marginInlineEnd: 0 }}
-                    onClick={() => setStockCode(item.stockCode)}
-                  >
-                    {formatHistoryLabel(item, stockOptionByCode)}
-                  </Tag>
-                ))}
-              </Space>
-            </Col>
-          </Row>
+          <div className="query-history">
+            <Text type="secondary" className="query-history__label">
+              最近查询
+            </Text>
+            <div className="query-history__tags">
+              {queryHistory.map((item) => (
+                <Tag
+                  key={item.stockCode}
+                  style={{ cursor: "pointer", marginInlineEnd: 0, flexShrink: 0 }}
+                  onClick={() => setStockCode(item.stockCode)}
+                >
+                  {formatHistoryLabel(item, stockOptionByCode)}
+                </Tag>
+              ))}
+            </div>
+          </div>
         )}
       </Card>
 
@@ -405,13 +468,17 @@ export default function StockAnalysisPage() {
                   kline={briefResult.kline}
                   nodes={briefResult.nodes}
                   stockName={stockOptionByCode.get(briefResult.stock_code)?.name}
+                  highlightedNodeKey={highlightedNodeKey}
                 />
                 {briefResult.nodes.length > 0 && (
                   <Space wrap style={{ marginTop: 8 }}>
                     {briefResult.nodes.map((node) => (
                       <Tag
-                        key={`${node.date}-${node.type}`}
+                        key={getNodeKey(node)}
                         color={NODE_TAG_COLORS[node.type] ?? "purple"}
+                        style={{ cursor: "default" }}
+                        onMouseEnter={() => setHighlightedNodeKey(getNodeKey(node))}
+                        onMouseLeave={() => setHighlightedNodeKey(null)}
                       >
                         {node.date} {node.label}
                       </Tag>
@@ -433,7 +500,7 @@ export default function StockAnalysisPage() {
               </Space>
             }
           >
-            {briefLoading && (
+            {briefLoading && !showSummaryContent && (
               <div style={{ padding: "24px 0", textAlign: "center" }}>
                 <Spin tip="正在生成简要分析..." />
               </div>
@@ -441,8 +508,8 @@ export default function StockAnalysisPage() {
             {!briefLoading && briefError && (
               <Alert type="error" message={briefError} showIcon />
             )}
-            {!briefLoading && !briefError && briefResult && (
-              <MarkdownContent content={briefResult.summary} compact />
+            {showSummaryContent && !briefError && (
+              <MarkdownContent content={summaryContent} compact />
             )}
           </Card>
 
@@ -489,7 +556,6 @@ export default function StockAnalysisPage() {
                     type="primary"
                     icon={<RobotOutlined />}
                     onClick={handleGenerateDetail}
-                    disabled={briefLoading || !briefResult || !!briefError}
                   >
                     生成完整 AI 分析
                   </Button>

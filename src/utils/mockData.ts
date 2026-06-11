@@ -1,6 +1,7 @@
 import type { StockAnalysisResponse, KLinePoint, ImportantNode } from "../types";
 
 const STOCK_NAMES: Record<string, string> = {
+  "00700.HK": "腾讯控股",
   "000001.SZ": "平安银行",
   "600519.SH": "贵州茅台",
   "000858.SZ": "五粮液",

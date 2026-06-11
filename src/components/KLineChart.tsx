@@ -1,5 +1,6 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import ReactECharts from "echarts-for-react";
+import type { EChartsType } from "echarts";
 import type { KLinePoint, ImportantNode } from "../types";
 import useIsMobile from "../hooks/useIsMobile";
 
@@ -26,14 +27,63 @@ function findBarByDate(kline: KLinePoint[], dates: string[], date: string): KLin
   return kline.find((bar) => normalizeDate(bar.date) === normalized) ?? null;
 }
 
+export function getNodeKey(node: ImportantNode): string {
+  return `${node.date}-${node.type}`;
+}
+
+function showNodeOnChart(
+  instance: EChartsType,
+  node: ImportantNode,
+  kline: KLinePoint[],
+  dates: string[],
+): void {
+  const nodeKey = getNodeKey(node);
+  const idx = dates.indexOf(node.date);
+  const bar = idx >= 0 ? kline[idx] : null;
+  const y = node.price ?? bar?.high ?? 0;
+
+  instance.dispatchAction({ type: "downplay", seriesIndex: 0 });
+  instance.dispatchAction({
+    type: "highlight",
+    seriesIndex: 0,
+    dataType: "markPoint",
+    name: nodeKey,
+  });
+
+  const pixel = instance.convertToPixel({ seriesIndex: 0 }, [node.date, y]);
+  if (pixel && Number.isFinite(pixel[0]) && Number.isFinite(pixel[1])) {
+    instance.dispatchAction({
+      type: "showTip",
+      x: pixel[0],
+      y: pixel[1],
+    });
+    return;
+  }
+
+  if (idx >= 0) {
+    instance.dispatchAction({
+      type: "showTip",
+      seriesIndex: 0,
+      dataIndex: idx,
+    });
+  }
+}
+
+function hideNodeOnChart(instance: EChartsType): void {
+  instance.dispatchAction({ type: "hideTip" });
+  instance.dispatchAction({ type: "downplay", seriesIndex: 0 });
+}
+
 interface Props {
   kline: KLinePoint[];
   nodes: ImportantNode[];
   stockName?: string;
+  highlightedNodeKey?: string | null;
 }
 
-export default function KLineChart({ kline, nodes, stockName }: Props) {
+export default function KLineChart({ kline, nodes, stockName, highlightedNodeKey = null }: Props) {
   const isMobile = useIsMobile();
+  const chartRef = useRef<ReactECharts>(null);
 
   const option = useMemo(() => {
     const dates = kline.map((k) => k.date);
@@ -46,7 +96,7 @@ export default function KLineChart({ kline, nodes, stockName }: Props) {
       const bar = idx >= 0 ? kline[idx] : null;
       const y = node.price ?? bar?.high ?? 0;
       return {
-        name: node.label,
+        name: getNodeKey(node),
         coord: [node.date, y],
         value: node.label,
         symbol: "pin",
@@ -239,8 +289,28 @@ export default function KLineChart({ kline, nodes, stockName }: Props) {
     };
   }, [kline, nodes, stockName, isMobile]);
 
+  useEffect(() => {
+    const instance = chartRef.current?.getEchartsInstance();
+    if (!instance) return;
+
+    if (!highlightedNodeKey) {
+      hideNodeOnChart(instance);
+      return;
+    }
+
+    const node = nodes.find((item) => getNodeKey(item) === highlightedNodeKey);
+    if (!node) {
+      hideNodeOnChart(instance);
+      return;
+    }
+
+    const dates = kline.map((bar) => bar.date);
+    showNodeOnChart(instance, node, kline, dates);
+  }, [highlightedNodeKey, nodes, kline]);
+
   return (
     <ReactECharts
+      ref={chartRef}
       option={option}
       style={{ height: isMobile ? 380 : 480, width: "100%" }}
       notMerge

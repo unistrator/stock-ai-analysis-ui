@@ -6,12 +6,14 @@ import type {
 } from "../types";
 import { authHeaders, requireToken } from "./auth";
 import { createMockAnalysis, mockDelay } from "./mockData";
+import { readBriefSseStream } from "./sseBriefStream";
 
 const ANALYZE_BRIEF_URL =
   import.meta.env.VITE_ANALYZE_BRIEF_URL ?? "/trees/analyze/brief";
 const ANALYZE_DETAIL_URL =
   import.meta.env.VITE_ANALYZE_DETAIL_URL ?? "/trees/analyze/detail";
 const USE_MOCK = import.meta.env.VITE_USE_MOCK === "true";
+const MOCK_BRIEF_STREAM = import.meta.env.VITE_MOCK_BRIEF_STREAM === "true";
 
 interface TreesDailyBar {
   date: string;
@@ -196,30 +198,120 @@ async function requestTreesSection<T>(
   return res.json() as Promise<T>;
 }
 
+export interface BriefAnalysisStreamOptions {
+  onSummaryChunk?: (summary: string) => void;
+}
+
+async function simulateMockBriefStream(
+  summary: string,
+  response: TreesBriefResponse,
+  onSummaryChunk: ((summary: string) => void) | undefined,
+  signal?: AbortSignal,
+): Promise<TreesBriefResponse> {
+  const chunkSize = 28;
+  let partial = "";
+
+  for (let offset = 0; offset < summary.length; offset += chunkSize) {
+    await mockDelay(40, signal);
+    partial += summary.slice(offset, offset + chunkSize);
+    onSummaryChunk?.(partial);
+  }
+
+  return response;
+}
+
+function buildMockBriefResponse(mock: ReturnType<typeof createMockAnalysis>): TreesBriefResponse {
+  const importantPoint = Object.fromEntries(
+    mock.nodes.map((node) => [node.date, node.description]),
+  );
+
+  return {
+    total_analyze: `## 简要总结\n\n${mock.summary}`,
+    analysis: mock.analysis,
+    important_point: importantPoint,
+    daily_data: mock.kline.map((bar) => ({
+      date: bar.date,
+      open: bar.open,
+      high: bar.high,
+      low: bar.low,
+      close: bar.close,
+      volume: bar.volume ?? 0,
+    })),
+    meta: {
+      stock_code: mock.stock_code,
+    },
+  };
+}
+
+function isCachedBriefResponse(res: Response): boolean {
+  const contentType = res.headers.get("Content-Type") ?? "";
+  return contentType.includes("application/json");
+}
+
+async function requestBriefAnalysis(
+  stockCode: string,
+  startDate: string,
+  endDate: string,
+  options?: BriefAnalysisStreamOptions,
+  signal?: AbortSignal,
+): Promise<TreesBriefResponse> {
+  const res = await fetch(withAuthUrl(ANALYZE_BRIEF_URL), {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: buildAnalyzeRequestBody(stockCode, startDate, endDate),
+    signal,
+  });
+
+  handleAuthError(res);
+  if (!res.ok) {
+    throw new Error(await parseAnalyzeError(res));
+  }
+
+  // 命中缓存：一次性返回完整 JSON；未命中：SSE 流式生成 AI 分析
+  if (isCachedBriefResponse(res)) {
+    return res.json() as Promise<TreesBriefResponse>;
+  }
+
+  const meta = await readBriefSseStream(res, options, signal);
+  return {
+    analysis: meta.analysis || "",
+    total_analyze: meta.total_analyze || "",
+    daily_data: meta.daily_data as TreesDailyBar[],
+    important_point: meta.important_point || {},
+    meta: meta.meta as TreesBriefResponse["meta"],
+  };
+}
+
 export async function fetchBriefAnalysis(
   stockCode: string,
   startDate: string,
   endDate: string,
   signal?: AbortSignal,
+  options?: BriefAnalysisStreamOptions,
 ): Promise<BriefAnalysisResult> {
   if (USE_MOCK) {
-    await mockDelay(600, signal);
+    await mockDelay(MOCK_BRIEF_STREAM ? 200 : 600, signal);
     const mock = createMockAnalysis(stockCode, startDate, endDate);
-    return {
-      stock_code: mock.stock_code,
-      start_date: mock.start_date,
-      end_date: mock.end_date,
-      summary: mock.summary,
-      kline: mock.kline,
-      nodes: mock.nodes,
-    };
+
+    if (MOCK_BRIEF_STREAM) {
+      const response = buildMockBriefResponse(mock);
+      const data = await simulateMockBriefStream(
+        response.total_analyze,
+        response,
+        options?.onSummaryChunk,
+        signal,
+      );
+      return mapBriefResponse(data, startDate, endDate);
+    }
+
+    return mapBriefResponse(buildMockBriefResponse(mock), startDate, endDate);
   }
 
-  const data = await requestTreesSection<TreesBriefResponse>(
-    ANALYZE_BRIEF_URL,
+  const data = await requestBriefAnalysis(
     stockCode,
     startDate,
     endDate,
+    options,
     signal,
   );
   return mapBriefResponse(data, startDate, endDate);

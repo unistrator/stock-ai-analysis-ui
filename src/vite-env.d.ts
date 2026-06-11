@@ -7,6 +7,7 @@ interface ImportMetaEnv {
   readonly VITE_ANALYZE_DETAIL_URL: string;
   readonly VITE_STOCK_MAPPING_URL: string;
   readonly VITE_USE_MOCK: string;
+  readonly VITE_MOCK_BRIEF_STREAM: string;
 }
 
 interface ImportMeta {

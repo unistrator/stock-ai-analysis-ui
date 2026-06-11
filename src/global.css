@@ -131,6 +131,28 @@ body {
   color: #4096ff;
 }
 
+.query-history {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 20px;
+  min-width: 0;
+}
+
+.query-history__label {
+  flex-shrink: 0;
+  font-size: 12px;
+}
+
+.query-history__tags {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
 @media (max-width: 767px) {
   .ant-card-head-title {
     white-space: normal !important;
