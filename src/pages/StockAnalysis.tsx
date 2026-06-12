@@ -252,6 +252,10 @@ export default function StockAnalysisPage() {
     setStreamingSummary("");
     setSummaryIsStreaming(false);
     setDetailResult(null);
+    setStreamingDetail("");
+    setDetailIsStreaming(false);
+    setDetailTypewriterResetKey((key) => key + 1);
+    setDetailLoading(false);
     setHighlightedNodeKey(null);
 
     const isActive = () => activeQueryRef.current?.controller === controller;
